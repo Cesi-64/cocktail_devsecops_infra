@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Géré par Ansible - sauvegarde chiffrée de la base Cocktail
+set -euo pipefail
+
+export AZCOPY_AUTO_LOGIN_TYPE=MSI   # identité managée de la VM
+
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+DIR=/var/backups/cocktail
+FILE="${DIR}/cocktail-${TS}.sql.gz.age"
+DEST="https://{{ backup_storage_account }}.blob.core.windows.net/{{ backup_container }}/{{ env_name }}/$(basename "${FILE}")"
+
+install -d -m 0700 "${DIR}"
+
+echo "[$(date -Is)] Début de la sauvegarde"
+docker exec cocktail-db sh -c 'exec mariadb-dump -uroot -p"$MARIADB_ROOT_PASSWORD" --single-transaction --routines --databases "$MARIADB_DATABASE"' \
+  | gzip -9 \
+  | age -r "{{ backup_age_recipient }}" > "${FILE}"
+
+azcopy copy "${FILE}" "${DEST}" --log-level=ERROR --output-level=quiet
+find "${DIR}" -type f -mtime +{{ backup_local_retention_days }} -delete
+
+echo "[$(date -Is)] Sauvegarde envoyée : ${DEST}"

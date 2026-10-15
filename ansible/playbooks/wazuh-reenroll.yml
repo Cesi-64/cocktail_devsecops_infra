@@ -1,0 +1,9 @@
+---
+# Réinscrit l'agent Wazuh auprès d'un manager reconstruit (reprise de la supervision).
+- name: Réinscrire l'agent Wazuh
+  hosts: all
+  become: true
+  roles:
+    - role: wazuh_agent
+      vars:
+        wazuh_force_enroll: true

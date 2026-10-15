@@ -1,0 +1,22 @@
+---
+# Supprime un agent du manager Wazuh (appelé à la destruction du staging,
+# pour ne pas accumuler d'agents "déconnectés" dans le dashboard).
+#   ansible-playbook -i inventories/monitoring playbooks/wazuh-remove-agent.yml -e agent_name=cocktail-staging
+- name: Retirer un agent Wazuh
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Identifiant de l'agent
+      ansible.builtin.shell: |
+        set -o pipefail
+        /var/ossec/bin/manage_agents -l | sed -nE 's/^ *ID: ([0-9]+), Name: {{ agent_name }},.*/\1/p'
+      args:
+        executable: /bin/bash
+      register: agent_ids
+      changed_when: false
+
+    - name: Suppression
+      ansible.builtin.command: /var/ossec/bin/manage_agents -r {{ item }}
+      loop: "{{ agent_ids.stdout_lines }}"
+      changed_when: true

@@ -1,0 +1,21 @@
+# Géré par Ansible - expose le dashboard Wazuh (installé sur l'hôte) en HTTPS
+http:
+  routers:
+    wazuh:
+      rule: "Host(`{{ wazuh_fqdn }}`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: le
+      service: wazuh
+
+  services:
+    wazuh:
+      loadBalancer:
+        serversTransport: wazuh-selfsigned
+        servers:
+          - url: "https://host.docker.internal:{{ wazuh_dashboard_port }}"
+
+  serversTransports:
+    wazuh-selfsigned:
+      # Le dashboard Wazuh utilise un certificat auto-signé en interne
+      insecureSkipVerify: true

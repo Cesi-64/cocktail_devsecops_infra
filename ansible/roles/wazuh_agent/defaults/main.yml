@@ -1,0 +1,5 @@
+---
+wazuh_agent_name: "{{ inventory_hostname }}"
+wazuh_agent_group: "{{ env_name }}"
+# true = forcer une nouvelle inscription (après une reprise de la VM de supervision)
+wazuh_force_enroll: false

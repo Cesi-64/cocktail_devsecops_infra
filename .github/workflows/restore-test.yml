@@ -1,0 +1,140 @@
+# =====================================================================
+# Test de restauration mensuel
+# "Une sauvegarde qui n'a jamais été restaurée n'est pas une sauvegarde."
+# Le 1er de chaque mois : staging créé, dernière version de prod déployée,
+# dernière sauvegarde de prod restaurée et contrôlée, puis staging détruit.
+# =====================================================================
+name: Sauvegardes - Test de restauration
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-infra
+  cancel-in-progress: false
+
+jobs:
+  latest:
+    name: Dernière version en production
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: read
+    outputs:
+      version: ${{ steps.r.outputs.version }}
+      backend_image: ${{ steps.r.outputs.backend_image }}
+      frontend_image: ${{ steps.r.outputs.frontend_image }}
+    steps:
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+      - id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "${GH_TOKEN}" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
+          BASE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cocktail-app"
+          VERSION=$(crane ls "${BASE}/backend" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          [ -n "${VERSION}" ] || { echo "::error::Aucune version publiée"; exit 1; }
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          for c in backend frontend; do
+            echo "${c}_image=${BASE}/${c}@$(crane digest "${BASE}/${c}:${VERSION}")" >> "$GITHUB_OUTPUT"
+          done
+
+  up:
+    name: Créer le staging
+    needs: latest
+    uses: ./.github/workflows/staging-up.yml
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+
+  deploy:
+    name: Déployer la version de prod sur le staging
+    needs: [latest, up]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      backend_image: ${{ needs.latest.outputs.backend_image }}
+      frontend_image: ${{ needs.latest.outputs.frontend_image }}
+      version: ${{ needs.latest.outputs.version }}
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+
+  restore:
+    name: Restaurer la sauvegarde de prod sur le staging
+    needs: deploy
+    runs-on: ubuntu-24.04
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ENV_NAME: staging
+      BACKUP_STORAGE_ACCOUNT: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Préparer Terraform, Ansible et Azure
+        uses: ./.github/actions/setup-infra
+        with:
+          environment: ${{ env.ENV_NAME }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Inventaire depuis Terraform
+        uses: ./.github/actions/ansible-inventory
+        with:
+          environment: staging
+
+      - name: Clé privée age
+        env:
+          AGE_KEY: ${{ secrets.BACKUP_AGE_PRIVATE_KEY }}
+        run: |
+          printf '%s\n' "${AGE_KEY}" > "${RUNNER_TEMP}/age.key"
+          chmod 600 "${RUNNER_TEMP}/age.key"
+          echo "AGE_IDENTITY_FILE=${RUNNER_TEMP}/age.key" >> "$GITHUB_ENV"
+
+      - name: Ouvrir le SSH pour ce runner
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: staging
+          mode: open
+
+      - name: Restauration + contrôle
+        run: ansible-playbook -i ansible/inventories/staging ansible/playbooks/restore.yml -e backup_source_env=production
+
+      - name: Refermer le SSH
+        if: always()
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: staging
+          mode: close
+
+      - name: Effacer la clé age
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/age.key"
+
+  down:
+    name: Détruire le staging
+    needs: restore
+    if: always()
+    uses: ./.github/workflows/staging-down.yml
+    with:
+      force: true
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write

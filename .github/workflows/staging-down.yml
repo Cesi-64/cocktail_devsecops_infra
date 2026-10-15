@@ -1,0 +1,132 @@
+# =====================================================================
+# Staging - destruction
+#  - appelé par cocktail-app après la mise en production ;
+#  - planifié chaque jour à 17h (heure de Paris) : si on a oublié le
+#    staging, il ne tourne pas (et ne coûte pas) toute la nuit ;
+#  - lançable à la main.
+# GitHub exécute les crons en UTC : 17h à Paris = 15h UTC en été, 16h UTC
+# en hiver. On planifie les deux et on ne garde que celui qui tombe à 17h.
+# =====================================================================
+name: Staging - Détruire
+
+on:
+  workflow_call:
+    inputs:
+      infra_ref:
+        type: string
+        default: v1
+      force:
+        description: Ignorer le contrôle de l'heure (appel depuis un autre workflow)
+        type: boolean
+        default: true
+  workflow_dispatch:
+  schedule:
+    - cron: '0 15 * * *'
+    - cron: '0 16 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  down:
+    name: Destruction du staging
+    runs-on: ubuntu-24.04
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ENV_NAME: staging
+      # Variables Terraform (organisation GitHub)
+      TF_VAR_domain: ${{ vars.DOMAIN }}
+      TF_VAR_dns_zone_resource_group: ${{ vars.DNS_ZONE_RESOURCE_GROUP }}
+      TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+      TF_VAR_admin_ssh_cidrs: ${{ vars.ADMIN_SSH_CIDRS || '[]' }}
+      TF_VAR_shared_resource_group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+      TF_VAR_backup_storage_account_name: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+    steps:
+      - name: Est-il 17h à Paris ?
+        id: clock
+        run: |
+          HOUR=$(TZ=Europe/Paris date +%H)
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ inputs.force }}" != "true" ] && [ "${HOUR}" != "17" ]; then
+            echo "Il est ${HOUR}h à Paris : ce déclenchement n'est pas le bon (heure d'été/hiver)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Token GitHub App (lecture du dépôt infra)
+        if: steps.clock.outputs.skip != 'true'
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.BOT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: cocktail-infra
+
+      # Appelé depuis cocktail-app : on récupère la version demandée du dépôt
+      # infra (infra_ref, "v1" par défaut). Lancé depuis cocktail-infra : la branche courante.
+      - name: Checkout du dépôt infra
+        if: steps.clock.outputs.skip != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/cocktail-infra
+          ref: ${{ github.repository == format('{0}/cocktail-infra', github.repository_owner) && github.ref || inputs.infra_ref }}
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: false
+
+      - name: Préparer Terraform, Ansible et Azure
+        if: steps.clock.outputs.skip != 'true'
+        uses: ./.github/actions/setup-infra
+        with:
+          environment: ${{ env.ENV_NAME }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Le staging existe-t-il ?
+        id: inv
+        if: steps.clock.outputs.skip != 'true'
+        uses: ./.github/actions/ansible-inventory
+        with:
+          environment: staging
+
+      # Nettoyage du dashboard Wazuh (non bloquant : la destruction passe avant tout)
+      - name: Retirer l'agent Wazuh du staging
+        if: steps.clock.outputs.skip != 'true' && steps.inv.outputs.exists == 'true'
+        continue-on-error: true
+        run: |
+          terraform -chdir=terraform/monitoring init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}"
+          RG=$(terraform -chdir=terraform/monitoring output -raw resource_group)
+          NSG=$(terraform -chdir=terraform/monitoring output -raw nsg_name)
+          RULE="gha-ssh-${GITHUB_RUN_ID}-wazuh"
+          terraform -chdir=terraform/monitoring output -raw ansible_inventory > ansible/inventories/monitoring/hosts.yml
+          terraform -chdir=terraform/monitoring output -raw ansible_tf_vars > ansible/inventories/monitoring/group_vars/all/terraform.yml
+          IP=$(curl -sSf https://api.ipify.org)
+          az network nsg rule create -g "${RG}" --nsg-name "${NSG}" -n "${RULE}" --priority 310 \
+            --direction Inbound --access Allow --protocol Tcp --source-address-prefixes "${IP}/32" \
+            --destination-port-ranges 22 -o none
+          sleep 15
+          ansible-playbook -i ansible/inventories/monitoring ansible/playbooks/wazuh-remove-agent.yml \
+            -e agent_name=cocktail-staging || true
+          az network nsg rule delete -g "${RG}" --nsg-name "${NSG}" -n "${RULE}" -o none
+
+      - name: terraform destroy
+        if: steps.clock.outputs.skip != 'true' && steps.inv.outputs.exists == 'true'
+        run: terraform -chdir=terraform/staging destroy -auto-approve
+
+      - name: Résumé
+        if: steps.clock.outputs.skip != 'true'
+        run: |
+          if [ "${{ steps.inv.outputs.exists }}" = "true" ]; then
+            echo "### Staging détruit" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Aucun staging à détruire" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,38 @@
+# Variables communes à tous les environnements.
+# Les SECRETS ne sont jamais écrits ici : ils viennent des variables
+# d'environnement positionnées par la CI à partir des secrets GitHub.
+
+project_dir: /opt/cocktail
+timezone: Europe/Paris
+
+# --- Points d'entrée de la supervision (VM monitoring) ---
+loki_push_url: "https://loki.{{ domain }}/loki/api/v1/push"
+metrics_push_url: "https://metrics.{{ domain }}/api/v1/write"
+wazuh_manager_address: "monitoring.{{ domain }}"
+
+# --- Versions (mises à jour par PR, jamais "latest") ---
+traefik_image: traefik:v3.7
+mariadb_image: mariadb:11.8
+alloy_image: grafana/alloy:v1.20.1
+grafana_image: grafana/grafana:13.2.4
+loki_image: grafana/loki:3.7.8
+prometheus_image: prom/prometheus:v3.15.0
+wazuh_version: "4.14.9"      # agents <= version du manager
+
+# --- Let's Encrypt ---
+acme_email: "{{ lookup('env', 'ACME_EMAIL') }}"
+acme_ca_production: https://acme-v02.api.letsencrypt.org/directory
+acme_ca_staging: https://acme-staging-v02.api.letsencrypt.org/directory
+
+# --- Secrets (variables d'environnement de la CI) ---
+mariadb_root_password: "{{ lookup('env', 'MARIADB_ROOT_PASSWORD') }}"
+mariadb_password: "{{ lookup('env', 'MARIADB_PASSWORD') }}"
+jwt_secret: "{{ lookup('env', 'JWT_SECRET') }}"
+first_admin_password: "{{ lookup('env', 'FIRST_ADMIN_PASSWORD') }}"
+wazuh_registration_password: "{{ lookup('env', 'WAZUH_REGISTRATION_PASSWORD') }}"
+ingest_user: "{{ lookup('env', 'INGEST_USER') | default('alloy', true) }}"
+ingest_password: "{{ lookup('env', 'INGEST_PASSWORD') }}"
+grafana_admin_password: "{{ lookup('env', 'GRAFANA_ADMIN_PASSWORD') }}"
+backup_age_recipient: "{{ lookup('env', 'BACKUP_AGE_PUBLIC_KEY') }}"
+ghcr_user: "{{ lookup('env', 'GHCR_USER') }}"
+ghcr_token: "{{ lookup('env', 'GHCR_TOKEN') }}"

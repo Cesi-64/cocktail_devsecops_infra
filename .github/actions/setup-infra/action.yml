@@ -1,0 +1,84 @@
+# Prépare un runner pour piloter l'infra : Terraform, Ansible, connexion
+# Azure (OIDC, sans secret), clé SSH de déploiement et "terraform init".
+name: Setup infra
+description: Terraform + Ansible + Azure OIDC + init du state de l'environnement
+
+inputs:
+  environment:
+    description: staging | production | monitoring
+    required: true
+  azure-client-id:
+    required: true
+  azure-tenant-id:
+    required: true
+  azure-subscription-id:
+    required: true
+  tfstate-resource-group:
+    required: true
+  tfstate-storage-account:
+    required: true
+  ssh-private-key:
+    description: Clé privée SSH de déploiement
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Terraform
+      uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+      with:
+        terraform_version: "~1.16"
+        terraform_wrapper: false   # sinon "terraform output -raw" renvoie du texte décoré
+
+    - name: Ansible
+      shell: bash
+      run: |
+        pipx install "ansible-core>=2.18,<2.21"
+        pipx inject ansible-core passlib bcrypt   # hash bcrypt pour Traefik
+        ansible-galaxy collection install -r ansible/requirements.yml
+        sudo apt-get install -y -qq age >/dev/null
+
+    - name: Connexion Azure (OIDC, aucun mot de passe stocké)
+      uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      with:
+        client-id: ${{ inputs.azure-client-id }}
+        tenant-id: ${{ inputs.azure-tenant-id }}
+        subscription-id: ${{ inputs.azure-subscription-id }}
+
+    - name: Variables pour Terraform (provider + backend en OIDC)
+      shell: bash
+      env:
+        CID: ${{ inputs.azure-client-id }}
+        TID: ${{ inputs.azure-tenant-id }}
+        SID: ${{ inputs.azure-subscription-id }}
+      run: |
+        {
+          echo "ARM_USE_OIDC=true"
+          echo "ARM_CLIENT_ID=${CID}"
+          echo "ARM_TENANT_ID=${TID}"
+          echo "ARM_SUBSCRIPTION_ID=${SID}"
+          echo "TF_IN_AUTOMATION=true"
+          echo "TF_INPUT=false"
+          echo "ANSIBLE_CONFIG=${GITHUB_WORKSPACE}/ansible/ansible.cfg"
+          echo "ANSIBLE_FORCE_COLOR=true"
+        } >> "$GITHUB_ENV"
+
+    - name: Clé SSH de déploiement
+      shell: bash
+      env:
+        KEY: ${{ inputs.ssh-private-key }}
+      run: |
+        install -d -m 700 ~/.ssh
+        printf '%s\n' "${KEY}" > ~/.ssh/id_ed25519
+        chmod 600 ~/.ssh/id_ed25519
+
+    - name: terraform init (${{ inputs.environment }})
+      shell: bash
+      env:
+        ENV_NAME: ${{ inputs.environment }}
+        RG: ${{ inputs.tfstate-resource-group }}
+        SA: ${{ inputs.tfstate-storage-account }}
+      run: |
+        terraform -chdir="terraform/${ENV_NAME}" init \
+          -backend-config="resource_group_name=${RG}" \
+          -backend-config="storage_account_name=${SA}"

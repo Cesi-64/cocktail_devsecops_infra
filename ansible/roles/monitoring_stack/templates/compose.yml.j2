@@ -1,0 +1,101 @@
+# Géré par Ansible - VM de supervision
+{% set ingest_hash = (ingest_password | password_hash('bcrypt', salt=ingest_bcrypt_salt)) | replace('$', '$$') %}
+name: monitoring
+
+services:
+  traefik:
+    image: {{ traefik_image }}
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=monitoring
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.email={{ acme_email }}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.caserver={{ acme_ca_server }}
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --accesslog=true
+    ports:
+      - "80:80"
+      - "443:443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # accès au dashboard Wazuh installé sur l'hôte
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+      - ./traefik:/etc/traefik/dynamic:ro
+    networks: [monitoring]
+    security_opt: ["no-new-privileges:true"]
+
+  grafana:
+    image: {{ grafana_image }}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      GF_SERVER_ROOT_URL: https://{{ grafana_fqdn }}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    networks: [monitoring]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.grafana.rule=Host(`{{ grafana_fqdn }}`)
+      - traefik.http.routers.grafana.entrypoints=websecure
+      - traefik.http.routers.grafana.tls.certresolver=le
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
+
+  loki:
+    image: {{ loki_image }}
+    restart: unless-stopped
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+    networks: [monitoring]
+    labels:
+      - traefik.enable=true
+      # Seule l'URL d'envoi des logs est exposée, et uniquement avec authentification
+      - traefik.http.routers.loki.rule=Host(`{{ loki_fqdn }}`) && PathPrefix(`/loki/api/v1/push`)
+      - traefik.http.routers.loki.entrypoints=websecure
+      - traefik.http.routers.loki.tls.certresolver=le
+      - traefik.http.routers.loki.middlewares=ingest-auth
+      - traefik.http.services.loki.loadbalancer.server.port=3100
+      - traefik.http.middlewares.ingest-auth.basicauth.users={{ ingest_user }}:{{ ingest_hash }}
+
+  prometheus:
+    image: {{ prometheus_image }}
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time={{ prometheus_retention }}
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks: [monitoring]
+    labels:
+      - traefik.enable=true
+      # Seule l'URL de réception remote_write est exposée, avec authentification
+      - traefik.http.routers.metrics.rule=Host(`{{ metrics_fqdn }}`) && Path(`/api/v1/write`)
+      - traefik.http.routers.metrics.entrypoints=websecure
+      - traefik.http.routers.metrics.tls.certresolver=le
+      - traefik.http.routers.metrics.middlewares=ingest-auth
+      - traefik.http.services.metrics.loadbalancer.server.port=9090
+
+networks:
+  monitoring:
+    name: monitoring
+
+volumes:
+  grafana_data:
+  loki_data:
+  prometheus_data:

@@ -1,0 +1,87 @@
+---
+# Déploiement de l'application : Traefik (HTTPS) + MariaDB + backend + frontend.
+# Les images sont TOUJOURS référencées par digest (nom@sha256:...) : on déploie
+# exactement l'artefact qui a été construit, scanné et signé (BSP).
+- name: Vérifier les entrées
+  ansible.builtin.assert:
+    that:
+      - backend_image is search('@sha256:[a-f0-9]{64}$')
+      - frontend_image is search('@sha256:[a-f0-9]{64}$')
+      - mariadb_root_password | length > 0
+      - mariadb_password | length > 0
+      - jwt_secret | length > 0
+      - first_admin_password | length > 0
+      - acme_email | length > 0
+    fail_msg: "Image non référencée par digest ou secret manquant"
+    quiet: true
+
+- name: Dossiers du projet
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ project_dir }}"
+    - "{{ project_dir }}/letsencrypt"
+
+- name: Fichier compose
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ project_dir }}/compose.yml"
+    mode: "0640"
+
+- name: Secrets de l'application (.env lisible par root uniquement)
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ project_dir }}/.env"
+    mode: "0600"
+  no_log: true
+
+- name: Connexion temporaire à GHCR (token éphémère du workflow)
+  ansible.builtin.command:
+    cmd: docker login ghcr.io -u {{ ghcr_user }} --password-stdin
+    stdin: "{{ ghcr_token }}"
+  no_log: true
+  changed_when: false
+  when: ghcr_token | length > 0
+
+- name: Récupérer les images et (re)démarrer les services
+  block:
+    - name: docker compose up (attend que les healthchecks soient OK)
+      ansible.builtin.command: docker compose up -d --pull always --remove-orphans --wait --wait-timeout 240
+      args:
+        chdir: "{{ project_dir }}"
+      changed_when: true
+  rescue:
+    - name: Logs des conteneurs en cas d'échec
+      ansible.builtin.command: docker compose logs --tail 80
+      args:
+        chdir: "{{ project_dir }}"
+      changed_when: false
+      register: compose_logs
+
+    - name: Afficher les logs
+      ansible.builtin.debug:
+        var: compose_logs.stdout_lines
+
+    - name: Échec du déploiement
+      ansible.builtin.fail:
+        msg: "Les conteneurs ne sont pas devenus sains, voir les logs ci-dessus."
+  always:
+    - name: Déconnexion de GHCR
+      ansible.builtin.command: docker logout ghcr.io
+      changed_when: false
+
+- name: Tracer la version déployée (utile en reprise après sinistre)
+  ansible.builtin.copy:
+    dest: "{{ project_dir }}/DEPLOYED"
+    mode: "0644"
+    content: |
+      version={{ app_version }}
+      backend={{ backend_image }}
+      frontend={{ frontend_image }}
+      date={{ ansible_facts['date_time']['iso8601'] }}
+
+- name: Nettoyer les anciennes images
+  ansible.builtin.command: docker image prune -af --filter "until=168h"
+  changed_when: false

@@ -1,0 +1,40 @@
+---
+# Sauvegarde quotidienne de MariaDB : dump -> gzip -> chiffrement age -> Azure Blob.
+# La VM s'authentifie avec son identité managée (aucun secret Azure sur la machine).
+# Seule la clé PUBLIQUE age est sur la VM : la VM peut chiffrer, pas déchiffrer.
+- name: Vérifier les variables obligatoires
+  ansible.builtin.assert:
+    that:
+      - backup_age_recipient is match('^age1')
+      - backup_storage_account | length > 0
+    fail_msg: "BACKUP_AGE_PUBLIC_KEY (age1...) ou compte de stockage manquant"
+    quiet: true
+
+- name: Installer age
+  ansible.builtin.apt:
+    name: age
+    state: present
+
+- name: Installer azcopy
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -sSfL https://aka.ms/downloadazcopy-v10-linux \
+      | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/azcopy'
+    chmod 0755 /usr/local/bin/azcopy
+  args:
+    executable: /bin/bash
+    creates: /usr/local/bin/azcopy
+
+- name: Script de sauvegarde
+  ansible.builtin.template:
+    src: cocktail-backup.sh.j2
+    dest: /usr/local/bin/cocktail-backup.sh
+    mode: "0750"
+
+- name: Tâche planifiée quotidienne
+  ansible.builtin.cron:
+    name: cocktail-backup
+    hour: "{{ backup_cron_hour }}"
+    minute: "{{ backup_cron_minute }}"
+    job: "/usr/local/bin/cocktail-backup.sh >> /var/log/cocktail-backup.log 2>&1"
+    user: root

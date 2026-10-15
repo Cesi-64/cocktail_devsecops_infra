@@ -1,0 +1,36 @@
+# Régénère l'inventaire Ansible depuis le state Terraform distant.
+# Utile quand on n'a pas fait d'apply dans ce run (déploiement, destruction...).
+name: Inventaire Ansible depuis Terraform
+description: Écrit hosts.yml et group_vars/all/terraform.yml à partir de terraform output
+
+inputs:
+  environment:
+    required: true
+
+outputs:
+  exists:
+    description: "'true' si l'environnement existe (state non vide)"
+    value: ${{ steps.inv.outputs.exists }}
+
+runs:
+  using: composite
+  steps:
+    - id: inv
+      shell: bash
+      env:
+        ENV_NAME: ${{ inputs.environment }}
+      run: |
+        if ! terraform -chdir="terraform/${ENV_NAME}" output -raw ansible_inventory > /tmp/hosts.yml 2>/dev/null \
+           || [ ! -s /tmp/hosts.yml ]; then
+          echo "Aucune infrastructure ${ENV_NAME} dans le state."
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        DIR="ansible/inventories/${ENV_NAME}"
+        mkdir -p "${DIR}/group_vars/all"
+        mv /tmp/hosts.yml "${DIR}/hosts.yml"
+        {
+          echo "# Généré depuis terraform output"
+          terraform -chdir="terraform/${ENV_NAME}" output -raw ansible_tf_vars
+        } > "${DIR}/group_vars/all/terraform.yml"
+        echo "exists=true" >> "$GITHUB_OUTPUT"

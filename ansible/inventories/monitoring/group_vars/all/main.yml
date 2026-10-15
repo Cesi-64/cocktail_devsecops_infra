@@ -1,0 +1,10 @@
+# Variables propres à la VM de supervision (le reste est généré par Terraform)
+env_name: monitoring
+acme_ca_server: "{{ acme_ca_production }}"
+monitoring_dir: /opt/monitoring
+# Le dashboard Wazuh écoute sur ce port en local ; Traefik l'expose en HTTPS sur wazuh.<domaine>
+wazuh_dashboard_port: 8443
+loki_retention: 336h          # 14 jours
+prometheus_retention: 15d
+# Sel fixe pour un hash bcrypt stable (sinon Traefik redémarre à chaque run)
+ingest_bcrypt_salt: "CocktailIngestSalt202."

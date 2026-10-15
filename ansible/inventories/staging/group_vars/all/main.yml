@@ -1,0 +1,6 @@
+# Variables propres au staging (le reste est généré par Terraform dans terraform.yml)
+env_name: staging
+# Certificat Let's Encrypt de TEST : le staging est recréé tous les jours,
+# on évite ainsi d'atteindre les quotas de vrais certificats.
+acme_ca_server: "{{ acme_ca_staging }}"
+backup_enabled: false

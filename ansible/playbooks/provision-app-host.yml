@@ -1,0 +1,16 @@
+---
+# Prépare une VM applicative (staging ou production) : système, Docker,
+# agents de supervision (Alloy, Wazuh) et, en production, les sauvegardes.
+# L'application elle-même est déployée par deploy.yml.
+#
+#   ansible-playbook -i inventories/staging playbooks/provision-app-host.yml
+- name: Préparer une VM applicative
+  hosts: all
+  become: true
+  roles:
+    - common
+    - docker
+    - wazuh_agent
+    - alloy
+    - role: backup
+      when: backup_enabled | bool

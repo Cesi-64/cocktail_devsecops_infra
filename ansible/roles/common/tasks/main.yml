@@ -1,0 +1,47 @@
+---
+- name: Attendre que la VM accepte les connexions SSH
+  ansible.builtin.wait_for_connection:
+    timeout: 300
+
+- name: Attendre la fin de cloud-init (première initialisation Azure)
+  ansible.builtin.command: cloud-init status --wait
+  register: cloud_init
+  changed_when: false
+  failed_when: cloud_init.rc not in [0, 2]   # 2 = terminé avec avertissements
+
+- name: Mettre à jour le cache APT et les paquets
+  ansible.builtin.apt:
+    update_cache: true
+    upgrade: safe
+    cache_valid_time: 3600
+
+- name: Installer les paquets de base
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - jq
+      - unattended-upgrades
+      - apt-transport-https
+    state: present
+
+- name: Activer les mises à jour de sécurité automatiques
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    mode: "0644"
+
+- name: Fuseau horaire
+  community.general.timezone:
+    name: "{{ timezone }}"
+
+- name: Durcissement SSH (clé uniquement, pas de root)
+  ansible.builtin.template:
+    src: sshd-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/99-hardening.conf
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Restart ssh

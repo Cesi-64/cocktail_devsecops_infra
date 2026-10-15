@@ -1,0 +1,108 @@
+---
+# Restaure la base MariaDB depuis la dernière sauvegarde chiffrée (ou une
+# sauvegarde précise avec -e backup_blob=production/cocktail-....sql.gz.age).
+#
+# Le téléchargement et le DÉCHIFFREMENT ont lieu sur le runner (la clé privée
+# age ne quitte jamais la CI). Seul le dump en clair compressé est copié,
+# le temps de la restauration, sur la VM cible.
+- name: Récupérer et déchiffrer la sauvegarde (runner)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    backup_storage_account: "{{ lookup('env', 'BACKUP_STORAGE_ACCOUNT') }}"
+    backup_container: mariadb
+    backup_source_env: production
+    age_identity_file: "{{ lookup('env', 'AGE_IDENTITY_FILE') }}"
+    restore_workdir: /tmp/cocktail-restore
+  tasks:
+    - name: Dossier de travail
+      ansible.builtin.file:
+        path: "{{ restore_workdir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Trouver la sauvegarde la plus récente
+      ansible.builtin.command: >-
+        az storage blob list --auth-mode login
+        --account-name {{ backup_storage_account }} --container-name {{ backup_container }}
+        --prefix {{ backup_source_env }}/
+        --query "sort_by([], &properties.lastModified)[-1].name" -o tsv
+      register: latest_blob
+      changed_when: false
+      when: backup_blob is not defined
+
+    - name: Sauvegarde retenue
+      ansible.builtin.set_fact:
+        selected_blob: "{{ backup_blob | default(latest_blob.stdout) }}"
+
+    - name: Échec si aucune sauvegarde
+      ansible.builtin.assert:
+        that: selected_blob | length > 0
+        fail_msg: "Aucune sauvegarde trouvée dans {{ backup_container }}/{{ backup_source_env }}/"
+
+    - name: Télécharger la sauvegarde chiffrée
+      ansible.builtin.command: >-
+        az storage blob download --auth-mode login
+        --account-name {{ backup_storage_account }} --container-name {{ backup_container }}
+        --name {{ selected_blob }} --file {{ restore_workdir }}/backup.sql.gz.age --overwrite -o none
+      changed_when: true
+
+    - name: Déchiffrer (clé privée age de la CI)
+      ansible.builtin.command: >-
+        age --decrypt -i {{ age_identity_file }}
+        -o {{ restore_workdir }}/backup.sql.gz {{ restore_workdir }}/backup.sql.gz.age
+      changed_when: true
+
+- name: Restaurer la base sur la VM cible
+  hosts: all
+  become: true
+  vars:
+    restore_workdir: /tmp/cocktail-restore
+  tasks:
+    - name: Copier le dump sur la VM
+      ansible.builtin.copy:
+        src: "{{ restore_workdir }}/backup.sql.gz"
+        dest: /root/cocktail-restore.sql.gz
+        mode: "0600"
+
+    - name: Importer le dump dans MariaDB
+      ansible.builtin.shell: |
+        set -euo pipefail
+        gunzip -c /root/cocktail-restore.sql.gz \
+          | docker exec -i cocktail-db sh -c 'exec mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Supprimer le dump en clair
+      ansible.builtin.file:
+        path: /root/cocktail-restore.sql.gz
+        state: absent
+
+    - name: Contrôle - nombre d'utilisateurs et de cocktails restaurés
+      ansible.builtin.command: >-
+        docker exec cocktail-db sh -c
+        'exec mariadb -N -uroot -p"$MARIADB_ROOT_PASSWORD" -e
+        "SELECT (SELECT COUNT(*) FROM cocktail.Users), (SELECT COUNT(*) FROM cocktail.Cocktails)"'
+      register: restore_check
+      changed_when: false
+
+    - name: Résultat
+      ansible.builtin.debug:
+        msg: "Utilisateurs / cocktails restaurés : {{ restore_check.stdout }}"
+
+    - name: Échec si la base restaurée est vide
+      ansible.builtin.assert:
+        that: (restore_check.stdout.split() | first | int) > 0
+        fail_msg: "La base restaurée ne contient aucun utilisateur : sauvegarde invalide ?"
+
+- name: Nettoyer le runner
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Supprimer les fichiers de restauration
+      ansible.builtin.file:
+        path: /tmp/cocktail-restore
+        state: absent

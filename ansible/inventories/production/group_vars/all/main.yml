@@ -1,0 +1,7 @@
+# Variables propres à la production (le reste est généré par Terraform dans terraform.yml)
+env_name: production
+acme_ca_server: "{{ acme_ca_production }}"
+backup_enabled: true
+backup_cron_hour: "2"
+backup_cron_minute: "30"
+backup_local_retention_days: 3

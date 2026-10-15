@@ -1,0 +1,46 @@
+---
+# Supervision : Traefik (HTTPS) + Grafana + Loki + Prometheus
+# Les agents Alloy POUSSENT logs et métriques en HTTPS avec authentification :
+# aucun port d'administration n'est ouvert sur les VM supervisées.
+- name: Vérifier les variables obligatoires
+  ansible.builtin.assert:
+    that:
+      - ingest_password | length >= 16
+      - grafana_admin_password | length >= 12
+      - acme_email | length > 0
+    fail_msg: "INGEST_PASSWORD (16+), GRAFANA_ADMIN_PASSWORD (12+) ou ACME_EMAIL manquant"
+    quiet: true
+
+- name: Dossiers
+  ansible.builtin.file:
+    path: "{{ monitoring_dir }}/{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - ""
+    - letsencrypt
+    - traefik
+    - loki
+    - prometheus
+    - grafana/provisioning/datasources
+
+- name: Fichiers de configuration
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ monitoring_dir }}/{{ item.dest }}"
+    mode: "{{ item.mode | default('0644') }}"
+  loop:
+    - { src: compose.yml.j2, dest: compose.yml, mode: "0640" }
+    - { src: env.j2, dest: .env, mode: "0600" }
+    - { src: traefik-wazuh.yml.j2, dest: traefik/wazuh.yml }
+    - { src: loki.yml.j2, dest: loki/config.yml }
+    - { src: prometheus.yml.j2, dest: prometheus/prometheus.yml }
+    - { src: datasources.yml.j2, dest: grafana/provisioning/datasources/datasources.yml }
+  no_log: "{{ item.dest == '.env' }}"
+  notify: Restart monitoring
+
+- name: Démarrer la stack de supervision
+  ansible.builtin.command: docker compose up -d --pull missing --remove-orphans --wait --wait-timeout 300
+  args:
+    chdir: "{{ monitoring_dir }}"
+  changed_when: true

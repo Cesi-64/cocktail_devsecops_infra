@@ -1,0 +1,53 @@
+---
+# Wazuh "tout-en-un" (indexer + manager + dashboard) via l'assistant officiel.
+# Le dashboard écoute en local sur {{ wazuh_dashboard_port }} ; Traefik l'expose
+# en HTTPS sur wazuh.<domaine>. Les agents se connectent sur 1514/1515.
+- name: Vérifier les variables obligatoires
+  ansible.builtin.assert:
+    that:
+      - wazuh_registration_password | length >= 12
+    fail_msg: "WAZUH_REGISTRATION_PASSWORD manquant ou trop court (12 caractères min.)"
+    quiet: true
+
+- name: Télécharger l'assistant d'installation Wazuh
+  ansible.builtin.get_url:
+    url: "https://packages.wazuh.com/{{ wazuh_version.split('.')[0:2] | join('.') }}/wazuh-install.sh"
+    dest: /root/wazuh-install.sh
+    mode: "0700"
+
+- name: Installer Wazuh tout-en-un (15 à 25 minutes)
+  ansible.builtin.command: bash /root/wazuh-install.sh -a -p {{ wazuh_dashboard_port }}
+  args:
+    chdir: /root
+    creates: /var/ossec/bin/wazuh-control
+  async: 3600
+  poll: 30
+
+- name: Bloquer les versions des composants Wazuh
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: [wazuh-manager, wazuh-indexer, wazuh-dashboard, filebeat]
+
+- name: Exiger un mot de passe pour l'inscription des agents
+  ansible.builtin.replace:
+    path: /var/ossec/etc/ossec.conf
+    regexp: '<use_password>no</use_password>'
+    replace: '<use_password>yes</use_password>'
+  notify: Restart wazuh-manager
+
+- name: Mot de passe d'inscription des agents
+  ansible.builtin.copy:
+    dest: /var/ossec/etc/authd.pass
+    content: "{{ wazuh_registration_password }}\n"
+    owner: root
+    group: wazuh
+    mode: "0640"
+  no_log: true
+  notify: Restart wazuh-manager
+
+- name: Rappel - mot de passe admin du dashboard
+  ansible.builtin.debug:
+    msg: >-
+      Mot de passe 'admin' du dashboard : sur la VM, lancer
+      sudo tar -O -xvf /root/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt

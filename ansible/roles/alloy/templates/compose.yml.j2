@@ -1,0 +1,25 @@
+# Géré par Ansible
+name: alloy
+
+services:
+  alloy:
+    image: {{ alloy_image }}
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    command:
+      - run
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/log:/var/log:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro,rslave
+
+volumes:
+  alloy_data:

@@ -1,0 +1,36 @@
+---
+# Grafana Alloy : collecte les logs des conteneurs et du système (-> Loki)
+# et les métriques de la machine (-> Prometheus) sur la VM de supervision.
+- name: Vérifier les variables obligatoires
+  ansible.builtin.assert:
+    that:
+      - ingest_password | length > 0
+    fail_msg: "Secret INGEST_PASSWORD manquant"
+    quiet: true
+
+- name: Dossier Alloy
+  ansible.builtin.file:
+    path: /opt/alloy
+    state: directory
+    mode: "0750"
+
+- name: Configuration Alloy
+  ansible.builtin.template:
+    src: config.alloy.j2
+    dest: /opt/alloy/config.alloy
+    mode: "0600"
+  notify: Restart alloy
+
+- name: Fichier compose Alloy
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: /opt/alloy/compose.yml
+    mode: "0644"
+  notify: Restart alloy
+
+- name: Démarrer Alloy
+  ansible.builtin.command: docker compose up -d --pull missing --wait
+  args:
+    chdir: /opt/alloy
+  register: alloy_up
+  changed_when: "'Started' in alloy_up.stderr or 'Recreated' in alloy_up.stderr"

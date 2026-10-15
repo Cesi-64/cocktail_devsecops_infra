@@ -1,0 +1,140 @@
+# =====================================================================
+# Supervision - première installation ET reprise après sinistre
+# VM dédiée : Wazuh (SIEM) + Grafana / Loki / Prometheus derrière Traefik.
+#
+# À lancer AVANT la production et le staging : leurs agents (Alloy,
+# Wazuh) ont besoin que la supervision existe pour s'y connecter.
+#
+# Reprise : le nouveau manager Wazuh ne connaît plus les agents.
+# Cocher "reenroll_agents" pour réinscrire l'agent de production.
+# =====================================================================
+name: Supervision - Provisionner / Reprise
+
+on:
+  workflow_dispatch:
+    inputs:
+      reenroll_agents:
+        description: Réinscrire l'agent Wazuh de la production (après une reprise)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monitoring-infra
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    name: Terraform + Ansible (supervision)
+    runs-on: ubuntu-24.04
+    environment: monitoring
+    timeout-minutes: 60     # l'installation de Wazuh est longue
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ENV_NAME: monitoring
+      # Variables Terraform (organisation GitHub)
+      TF_VAR_domain: ${{ vars.DOMAIN }}
+      TF_VAR_dns_zone_resource_group: ${{ vars.DNS_ZONE_RESOURCE_GROUP }}
+      TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+      TF_VAR_admin_ssh_cidrs: ${{ vars.ADMIN_SSH_CIDRS || '[]' }}
+      TF_VAR_shared_resource_group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+      TF_VAR_backup_storage_account_name: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+      ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+      WAZUH_REGISTRATION_PASSWORD: ${{ secrets.WAZUH_REGISTRATION_PASSWORD }}
+      INGEST_PASSWORD: ${{ secrets.INGEST_PASSWORD }}
+      GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Préparer Terraform, Ansible et Azure
+        uses: ./.github/actions/setup-infra
+        with:
+          environment: ${{ env.ENV_NAME }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: terraform apply
+        run: terraform -chdir=terraform/monitoring apply -auto-approve
+
+      - name: Ouvrir le SSH pour ce runner
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: monitoring
+          mode: open
+
+      - name: Ansible - Wazuh + PLG
+        run: ansible-playbook -i ansible/inventories/monitoring ansible/playbooks/monitoring.yml
+
+      - name: Refermer le SSH
+        if: always()
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: monitoring
+          mode: close
+
+      - name: Résumé
+        run: |
+          {
+            echo "### Supervision prête"
+            echo "- Grafana : $(terraform -chdir=terraform/monitoring output -raw grafana_url) (utilisateur admin)"
+            echo "- Wazuh : $(terraform -chdir=terraform/monitoring output -raw wazuh_url) (mot de passe : voir le guide)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  reenroll:
+    name: Réinscription de l'agent de production
+    needs: provision
+    if: inputs.reenroll_agents
+    runs-on: ubuntu-24.04
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ENV_NAME: production
+      WAZUH_REGISTRATION_PASSWORD: ${{ secrets.WAZUH_REGISTRATION_PASSWORD }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Préparer Terraform, Ansible et Azure
+        uses: ./.github/actions/setup-infra
+        with:
+          environment: ${{ env.ENV_NAME }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Inventaire depuis Terraform
+        uses: ./.github/actions/ansible-inventory
+        with:
+          environment: production
+
+      - name: Ouvrir le SSH pour ce runner
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: production
+          mode: open
+
+      - name: Ansible - réinscription Wazuh
+        run: ansible-playbook -i ansible/inventories/production ansible/playbooks/wazuh-reenroll.yml
+
+      - name: Refermer le SSH
+        if: always()
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: production
+          mode: close

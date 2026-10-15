@@ -1,0 +1,8 @@
+# Généré par Terraform (${env}) - NE PAS MODIFIER À LA MAIN, NE PAS COMMITER
+all:
+  children:
+    ${group}:
+      hosts:
+        ${host}:
+          ansible_host: ${ip}
+          ansible_user: ${user}

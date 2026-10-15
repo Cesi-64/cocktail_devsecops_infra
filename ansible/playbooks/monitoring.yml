@@ -1,0 +1,11 @@
+---
+# VM de supervision : Wazuh (SIEM) + Grafana / Loki / Prometheus derrière Traefik.
+#   ansible-playbook -i inventories/monitoring playbooks/monitoring.yml
+- name: Installer la supervision
+  hosts: all
+  become: true
+  roles:
+    - common
+    - docker
+    - wazuh_manager
+    - monitoring_stack

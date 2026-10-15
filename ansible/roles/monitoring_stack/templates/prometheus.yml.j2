@@ -1,0 +1,9 @@
+# Géré par Ansible
+# Les métriques des VM arrivent par remote_write (Alloy) : pas de scrape distant.
+global:
+  scrape_interval: 30s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

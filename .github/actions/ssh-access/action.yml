@@ -1,0 +1,37 @@
+# Ouvre (ou referme) le port SSH de la VM pour la SEULE IP du runner GitHub,
+# le temps du job. Le reste du temps, le port 22 est fermé à Internet.
+name: Accès SSH temporaire
+description: Règle NSG temporaire autorisant l'IP du runner sur le port 22
+
+inputs:
+  environment:
+    required: true
+  mode:
+    description: open | close
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        ENV_NAME: ${{ inputs.environment }}
+        MODE: ${{ inputs.mode }}
+        RULE: gha-ssh-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        RG=$(terraform -chdir="terraform/${ENV_NAME}" output -raw resource_group 2>/dev/null || true)
+        NSG=$(terraform -chdir="terraform/${ENV_NAME}" output -raw nsg_name 2>/dev/null || true)
+        if [ -z "${RG}" ] || [ -z "${NSG}" ]; then
+          echo "Pas d'infrastructure ${ENV_NAME} : rien à faire."; exit 0
+        fi
+        if [ "${MODE}" = "open" ]; then
+          IP=$(curl -sSf https://api.ipify.org)
+          echo "Ouverture SSH pour ${IP} sur ${NSG}"
+          az network nsg rule create -g "${RG}" --nsg-name "${NSG}" -n "${RULE}" \
+            --priority 300 --direction Inbound --access Allow --protocol Tcp \
+            --source-address-prefixes "${IP}/32" --destination-port-ranges 22 -o none
+          sleep 15   # propagation de la règle
+        else
+          echo "Fermeture SSH sur ${NSG}"
+          az network nsg rule delete -g "${RG}" --nsg-name "${NSG}" -n "${RULE}" -o none || true
+        fi

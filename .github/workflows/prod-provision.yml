@@ -1,0 +1,187 @@
+# =====================================================================
+# Production - première installation ET reprise après sinistre (PRA)
+#
+#   Première fois : version vide, restore = false
+#     -> crée la VM, la prépare. L'appli arrivera au 1er merge de release.
+#   Reprise       : version = v1.2.0 (dernière version en prod), restore = true
+#     -> recrée la VM, redéploie la version, restaure la dernière sauvegarde.
+#
+# Terraform ne recrée que ce qui manque : si la VM existe encore,
+# il ne la touche pas (idempotence).
+# =====================================================================
+name: Production - Provisionner / Reprise
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version à (re)déployer, ex : v1.2.0 (vide = ne rien déployer)"
+        type: string
+        default: ""
+      restore:
+        description: Restaurer la dernière sauvegarde de la base
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-infra
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    name: Terraform + Ansible (production)
+    runs-on: ubuntu-24.04
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ENV_NAME: production
+      # Variables Terraform (organisation GitHub)
+      TF_VAR_domain: ${{ vars.DOMAIN }}
+      TF_VAR_dns_zone_resource_group: ${{ vars.DNS_ZONE_RESOURCE_GROUP }}
+      TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+      TF_VAR_admin_ssh_cidrs: ${{ vars.ADMIN_SSH_CIDRS || '[]' }}
+      TF_VAR_shared_resource_group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+      TF_VAR_backup_storage_account_name: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+      # Secrets des agents de supervision
+      ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+      WAZUH_REGISTRATION_PASSWORD: ${{ secrets.WAZUH_REGISTRATION_PASSWORD }}
+      INGEST_PASSWORD: ${{ secrets.INGEST_PASSWORD }}
+      BACKUP_AGE_PUBLIC_KEY: ${{ vars.BACKUP_AGE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Préparer Terraform, Ansible et Azure
+        uses: ./.github/actions/setup-infra
+        with:
+          environment: ${{ env.ENV_NAME }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: terraform apply
+        run: terraform -chdir=terraform/production apply -auto-approve
+
+      - name: Ouvrir le SSH pour ce runner
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: production
+          mode: open
+
+      - name: Ansible - préparer la VM (Docker, Alloy, Wazuh, sauvegardes)
+        run: ansible-playbook -i ansible/inventories/production ansible/playbooks/provision-app-host.yml
+
+      - name: Refermer le SSH
+        if: always()
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: production
+          mode: close
+
+  resolve:
+    name: Retrouver les images ${{ inputs.version }}
+    if: inputs.version != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: read   # accès aux paquets de cocktail-app (à autoriser, voir le guide)
+    outputs:
+      backend_image: ${{ steps.r.outputs.backend_image }}
+      frontend_image: ${{ steps.r.outputs.frontend_image }}
+    steps:
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+      - id: r
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "${GH_TOKEN}" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
+          BASE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cocktail-app"
+          for c in backend frontend; do
+            DIGEST=$(crane digest "${BASE}/${c}:${VERSION}")
+            echo "${c}_image=${BASE}/${c}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          done
+
+  deploy:
+    name: Déploiement
+    needs: [provision, resolve]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+      backend_image: ${{ needs.resolve.outputs.backend_image }}
+      frontend_image: ${{ needs.resolve.outputs.frontend_image }}
+      version: ${{ inputs.version }}
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+
+  restore:
+    name: Restauration de la base
+    needs: deploy
+    if: inputs.restore
+    runs-on: ubuntu-24.04
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ENV_NAME: production
+      BACKUP_STORAGE_ACCOUNT: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Préparer Terraform, Ansible et Azure
+        uses: ./.github/actions/setup-infra
+        with:
+          environment: ${{ env.ENV_NAME }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Inventaire depuis Terraform
+        uses: ./.github/actions/ansible-inventory
+        with:
+          environment: production
+
+      - name: Clé privée age (déchiffrement des sauvegardes)
+        env:
+          AGE_KEY: ${{ secrets.BACKUP_AGE_PRIVATE_KEY }}
+        run: |
+          printf '%s\n' "${AGE_KEY}" > "${RUNNER_TEMP}/age.key"
+          chmod 600 "${RUNNER_TEMP}/age.key"
+          echo "AGE_IDENTITY_FILE=${RUNNER_TEMP}/age.key" >> "$GITHUB_ENV"
+
+      - name: Ouvrir le SSH pour ce runner
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: production
+          mode: open
+
+      - name: Ansible - restauration
+        run: ansible-playbook -i ansible/inventories/production ansible/playbooks/restore.yml -e backup_source_env=production
+
+      - name: Refermer le SSH et effacer la clé
+        if: always()
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: production
+          mode: close
+
+      - name: Effacer la clé age
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/age.key"

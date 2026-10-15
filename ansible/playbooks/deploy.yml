@@ -1,0 +1,9 @@
+---
+# Déploie une version de l'application (images par digest).
+#   ansible-playbook -i inventories/<env> playbooks/deploy.yml \
+#     -e backend_image=ghcr.io/...@sha256:... -e frontend_image=... -e app_version=v1.2.0
+- name: Déployer l'application Cocktail
+  hosts: all
+  become: true
+  roles:
+    - app

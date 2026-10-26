@@ -44,7 +44,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Checkov
-        uses: bridgecrewio/checkov-action@6f26dc90000b74feb589a906cdfae540f5119895 # v12.3134.0
+        uses: bridgecrewio/checkov-action@c3e106d5f8f4253a6de5110efb41a080f83db294 # v12.3135.0
         with:
           directory: .
           framework: terraform,ansible,github_actions
@@ -53,7 +53,7 @@ jobs:
           soft_fail: true   # pédagogique : on publie tout, on corrige au fil de l'eau
       - name: Publier dans GitHub Security
         if: always()
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: checkov.sarif
           category: checkov
